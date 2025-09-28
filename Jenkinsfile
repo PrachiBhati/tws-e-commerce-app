@@ -24,7 +24,7 @@ pipeline {
         stage('Clone Repository') {
             steps {
                 script {
-                    clone("https://github.com/LondheShubham153/tws-e-commerce-app.git","master")
+                    clone("https://github.com/PrachiBhati/tws-e-commerce-app.git","master")
                 }
             }
         }
@@ -115,7 +115,7 @@ pipeline {
                         manifestsPath: 'kubernetes',
                         gitCredentials: 'github-credentials',
                         gitUserName: 'Jenkins CI',
-                        gitUserEmail: 'shubhamnath5@gmail.com'
+                        gitUserEmail: 'prachi98bhati@gmail.com'
                     )
                 }
             }
