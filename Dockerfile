@@ -4,8 +4,8 @@ FROM node:18-alpine AS builder
 # Set working directory
 WORKDIR /app
 
-# Install necessary build dependencies
-RUN apk add --no-cache python3 make g++
+# Update apk and install build dependencies
+RUN apk update && apk add --no-cache python3 make g++ bash
 
 # Copy package files
 COPY package*.json ./
