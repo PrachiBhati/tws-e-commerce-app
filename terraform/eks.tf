@@ -1,8 +1,6 @@
-####################
-# eks.tf (minimal)
-####################
-
+########################
 # Security Group for Node Group SSH access
+########################
 resource "aws_security_group" "node_group_remote_access" {
   name   = "node-group-ssh-access"
   vpc_id = module.vpc.vpc_id
@@ -12,10 +10,11 @@ resource "aws_security_group" "node_group_remote_access" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # tighten for production
+    cidr_blocks = ["0.0.0.0/0"] # tighten in prod
   }
 
   egress {
+    description = "Allow all outgoing traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -27,73 +26,147 @@ resource "aws_security_group" "node_group_remote_access" {
   }
 }
 
-# Reuse keypair (make sure this exists in another file, e.g. ec2.tf)
-# resource "aws_key_pair" "deployer" { ... }  <-- keep this only once in your configs
+########################
+# IAM Role for EKS Access
+########################
+resource "aws_iam_role" "eks_access_role" {
+  name = "eks-access-role"
 
-# Minimal EKS module config
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = {
+          AWS = "arn:aws:iam::386636311568:root" # trust entire account
+        },
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+# Allow terraform user to assume this role
+resource "aws_iam_policy" "allow_terraform_assume_role" {
+  name        = "allow-terraform-assume-eks-access-role"
+  description = "Allow terraform user to assume eks-access-role"
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = "sts:AssumeRole",
+        Resource = aws_iam_role.eks_access_role.arn
+      }
+    ]
+  })
+}
+
+# Attach policy to terraform user
+resource "aws_iam_user_policy_attachment" "terraform_user_assume" {
+  user       = "eks-demo" # replace with your actual IAM user
+  policy_arn = aws_iam_policy.allow_terraform_assume_role.arn
+}
+
+# Attach Admin to the Role
+resource "aws_iam_role_policy_attachment" "eks_access_attach" {
+  role       = aws_iam_role.eks_access_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
+########################
+# EKS Cluster
+########################
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"
 
-  cluster_name    = local.name
-  cluster_version = "1.31"
-
-  # If you want to access API publicly for testing, set public true; else keep private
-  cluster_endpoint_public_access  = true
+  cluster_name                    = local.name
+  cluster_version                 = "1.31"
+  cluster_endpoint_public_access  = false
   cluster_endpoint_private_access = true
 
-  # VPC & subnets (expects module.vpc to exist)
-  vpc_id     = module.vpc.vpc_id
-  subnet_ids = module.vpc.private_subnets
+  vpc_id                   = module.vpc.vpc_id
+  subnet_ids               = module.vpc.private_subnets
+  control_plane_subnet_ids = module.vpc.private_subnets
 
-  # Minimal addons
-  cluster_addons = {
-    coredns   = { most_recent = true }
-    kube-proxy = { most_recent = true }
-    vpc-cni   = { most_recent = true }
+  # Access entries (RBAC via AWS Auth)
+  access_entries = {
+    example = {
+      principal_arn = aws_iam_role.eks_access_role.arn
+
+      policy_associations = {
+        example = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    }
   }
 
-  # Managed node group(s) - cost-minimised config
+  # Cluster addons
+  cluster_addons = {
+    coredns = { most_recent = true }
+    kube-proxy = { most_recent = true }
+    vpc-cni = { most_recent = true }
+  }
+
+  # Security group rules
+  cluster_security_group_additional_rules = {
+    access_for_bastion_jenkins_hosts = {
+      cidr_blocks = ["0.0.0.0/0"]
+      description = "Allow all HTTPS traffic from jenkins and Bastion host"
+      from_port   = 443
+      to_port     = 443
+      protocol    = "tcp"
+      type        = "ingress"
+    }
+  }
+
+  ########################
+  # Node Group(s)
+  ########################
+  eks_managed_node_group_defaults = {
+    instance_types = ["t3.micro"] # ✅ free-tier eligible
+    attach_cluster_primary_security_group = true
+  }
+
   eks_managed_node_groups = {
-    small-ng = {
-      desired_size = 1
+    demo-ng = {
       min_size     = 1
-      max_size     = 1
+      max_size     = 2
+      desired_size = 1
 
-      # Use a micro instance to try to stay inside EC2 free-tier (if eligible)
-      instance_types = ["t3.micro"]
-      capacity_type  = "SPOT"   # use "SPOT" only if you are OK with interruptions
+      instance_types = ["t3.micro"] # ✅ avoid failure from before
+      capacity_type  = "ON_DEMAND"
 
+      disk_size                  = 20
       use_custom_launch_template = false
 
-      disk_size = 20
-
-      # remote access via the keypair and SG you already created elsewhere
       remote_access = {
         ec2_ssh_key               = aws_key_pair.deployer.key_name
         source_security_group_ids = [aws_security_group.node_group_remote_access.id]
       }
 
       tags = {
-        Name        = "${local.name}-ng"
+        Name        = "demo-ng"
         Environment = "dev"
       }
-
-      # ensure the keypair & SG exist before nodegroup creation
-      depends_on = [
-        aws_key_pair.deployer,
-        aws_security_group.node_group_remote_access
-      ]
     }
   }
 
-  tags = merge(local.tags, { "created_by" = "terraform" })
+  tags = merge(local.tags, { "created_by" = "eks-demo" })
 }
 
-# Optional: small data source to list running node instances (will populate when nodes up)
+########################
+# List EKS Node Instances
+########################
 data "aws_instances" "eks_nodes" {
   instance_tags = {
-    "eks:cluster-name" = module.eks.cluster_id
+    "eks:cluster-name" = module.eks.cluster_name
   }
 
   filter {
