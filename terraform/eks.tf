@@ -1,84 +1,24 @@
-########################
-# Security Group for Node Group SSH access
-########################
 resource "aws_security_group" "node_group_remote_access" {
-  name   = "node-group-ssh-access"
+  name   = "allow HTTP"
   vpc_id = module.vpc.vpc_id
-
   ingress {
-    description = "Allow SSH (for Bastion access)"
+    description = "port 22 allow"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # tighten in prod
+    cidr_blocks = ["0.0.0.0/0"]
   }
-
   egress {
-    description = "Allow all outgoing traffic"
+    description = " allow all outgoing traffic "
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
-  tags = {
-    Name = "${local.name}-node-sg"
-  }
 }
 
-########################
-# IAM Role for EKS Access
-########################
-resource "aws_iam_role" "eks_access_role" {
-  name = "eks-access-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Effect = "Allow",
-        Principal = {
-          AWS = "arn:aws:iam::386636311568:root" # trust entire account
-        },
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
-}
-
-# Allow terraform user to assume this role
-resource "aws_iam_policy" "allow_terraform_assume_role" {
-  name        = "allow-terraform-assume-eks-access-role"
-  description = "Allow terraform user to assume eks-access-role"
-
-  policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [
-      {
-        Effect = "Allow",
-        Action = "sts:AssumeRole",
-        Resource = aws_iam_role.eks_access_role.arn
-      }
-    ]
-  })
-}
-
-# Attach policy to terraform user
-resource "aws_iam_user_policy_attachment" "terraform_user_assume" {
-  user       = "eks-demo" # replace with your actual IAM user
-  policy_arn = aws_iam_policy.allow_terraform_assume_role.arn
-}
-
-# Attach Admin to the Role
-resource "aws_iam_role_policy_attachment" "eks_access_attach" {
-  role       = aws_iam_role.eks_access_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
-}
-
-########################
-# EKS Cluster
-########################
 module "eks" {
+
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"
 
@@ -87,14 +27,11 @@ module "eks" {
   cluster_endpoint_public_access  = false
   cluster_endpoint_private_access = true
 
-  vpc_id                   = module.vpc.vpc_id
-  subnet_ids               = module.vpc.private_subnets
-  control_plane_subnet_ids = module.vpc.private_subnets
-
-  # Access entries (RBAC via AWS Auth)
+  //access entry for any specific user or role (jenkins controller instance)
   access_entries = {
+    # One access entry with a policy associated
     example = {
-      principal_arn = aws_iam_role.eks_access_role.arn
+      principal_arn = "arn:aws:iam::386636311568:user/eks-demo"
 
       policy_associations = {
         example = {
@@ -107,14 +44,7 @@ module "eks" {
     }
   }
 
-  # Cluster addons
-  cluster_addons = {
-    coredns = { most_recent = true }
-    kube-proxy = { most_recent = true }
-    vpc-cni = { most_recent = true }
-  }
 
-  # Security group rules
   cluster_security_group_additional_rules = {
     access_for_bastion_jenkins_hosts = {
       cidr_blocks = ["0.0.0.0/0"]
@@ -126,44 +56,66 @@ module "eks" {
     }
   }
 
-  ########################
-  # Node Group(s)
-  ########################
-  eks_managed_node_group_defaults = {
-    instance_types = ["t3.micro"] # ✅ free-tier eligible
-    attach_cluster_primary_security_group = true
+
+  cluster_addons = {
+    coredns = {
+      most_recent = true
+    }
+    kube-proxy = {
+      most_recent = true
+    }
+    vpc-cni = {
+      most_recent = true
+    }
   }
 
+  vpc_id                   = module.vpc.vpc_id
+  subnet_ids               = module.vpc.private_subnets
+  control_plane_subnet_ids = module.vpc.private_subnets
+
+  # EKS Managed Node Group(s)
+
+  eks_managed_node_group_defaults = {
+
+    instance_types = ["t3.micro"]
+
+    attach_cluster_primary_security_group = true
+
+  }
+
+
+
   eks_managed_node_groups = {
-    demo-ng = {
+
+    tws-demo-ng = {
       min_size     = 1
-      max_size     = 2
+      max_size     = 1
       desired_size = 1
 
-      instance_types = ["t3.micro"] # ✅ avoid failure from before
+      instance_types = ["t3.micro"]
       capacity_type  = "ON_DEMAND"
 
-      disk_size                  = 20
-      use_custom_launch_template = false
+      disk_size                  = 35
+      use_custom_launch_template = false # Important to apply disk size!
 
       remote_access = {
-        ec2_ssh_key               = aws_key_pair.deployer.key_name
+        ec2_ssh_key               = resource.aws_key_pair.deployer.key_name
         source_security_group_ids = [aws_security_group.node_group_remote_access.id]
       }
 
       tags = {
-        Name        = "demo-ng"
+        Name        = "tws-demo-ng"
         Environment = "dev"
+        ExtraTag    = "e-commerce-app"
       }
     }
   }
 
-  tags = merge(local.tags, { "created_by" = "eks-demo" })
+  tags = local.tags
+
+
 }
 
-########################
-# List EKS Node Instances
-########################
 data "aws_instances" "eks_nodes" {
   instance_tags = {
     "eks:cluster-name" = module.eks.cluster_name

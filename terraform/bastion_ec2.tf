@@ -1,5 +1,3 @@
-
-
 resource "aws_security_group" "allow_user_bastion" {
   name        = "bastion_host_SG"
   description = "Allow user to connect"
